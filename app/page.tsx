@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { SensorData, ActuatorStatus, Alert, HistoricalData } from '@/types';
 import {
   TemperatureCard,
@@ -12,7 +12,19 @@ import AlertPanel from '@/components/AlertPanel';
 import ControlPanel from '@/components/ControlPanel';
 import HistoricalChart from '@/components/HistoricalChart';
 import { checkWaterQuality, formatTimestamp } from '@/lib/utils';
-import { SENSOR_UPDATE_INTERVAL } from '@/lib/constants';
+import {
+  supabase,
+  DEVICE_ID,
+  mapSensorRow,
+  mapHistoricalRow,
+  mapActuatorRow,
+  sendActuatorCommand,
+  fetchLatestSensorReading,
+  fetchHistoricalReadings,
+  fetchActuatorState,
+  type SensorReadingRow,
+  type ActuatorStateRow,
+} from '@/lib/supabase';
 import { Activity, Clock, Fish, Database, Globe } from 'lucide-react';
 
 // ─── Error Boundary ─────────────────────────────────────────────────────────
@@ -62,16 +74,14 @@ class ErrorBoundary extends React.Component<
   }
 }
 
-// ─── Mock Data Generator ─────────────────────────────────────────────────────
-function generateMockSensorData(): SensorData {
-  return {
-    temperature: 22 + Math.random() * 4,
-    pH: 7 + (Math.random() - 0.5) * 0.5,
-    dissolvedOxygen: 6 + Math.random() * 3,
-    electricalConductivity: 0.5 + Math.random() * 0.8,
-    timestamp: new Date(),
-  };
-}
+// ─── Defaults (used until first Supabase row arrives) ───────────────────────
+const PLACEHOLDER_SENSOR: SensorData = {
+  temperature: 0,
+  pH: 0,
+  dissolvedOxygen: 0,
+  electricalConductivity: 0,
+  timestamp: new Date(0),
+};
 
 // ─── Section Header ──────────────────────────────────────────────────────────
 function SectionHeader({
@@ -133,7 +143,7 @@ function StatusChip({
 // ─── Dashboard ───────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [mounted, setMounted] = useState(false);
-  const [sensorData, setSensorData] = useState<SensorData>(generateMockSensorData());
+  const [sensorData, setSensorData] = useState<SensorData>(PLACEHOLDER_SENSOR);
   const [actuatorStatus, setActuatorStatus] = useState<ActuatorStatus>({
     aeration: false,
     waterCirculation: false,
@@ -141,6 +151,12 @@ export default function Dashboard() {
   });
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [historicalData, setHistoricalData] = useState<HistoricalData[]>([]);
+  const [connected, setConnected] = useState(false);
+  const [hasInitialData, setHasInitialData] = useState(false);
+
+  // Track recent alerts to dedupe (Supabase pushes can fire faster than the
+  // user can dismiss; we don't want a flood of identical entries).
+  const alertSeenRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     setMounted(true);
@@ -149,38 +165,79 @@ export default function Dashboard() {
   useEffect(() => {
     if (!mounted) return;
 
-    const interval = setInterval(() => {
-      const newData = generateMockSensorData();
-      setSensorData(newData);
+    let cancelled = false;
 
-      const newAlerts = checkWaterQuality(newData);
-      if (newAlerts.length > 0) {
-        setAlerts(prev => [...newAlerts, ...prev].slice(0, 10));
-      }
+    // ---- 1. Initial snapshot (latest reading + history + actuator state) ----
+    (async () => {
+      const [latest, history, actuators] = await Promise.all([
+        fetchLatestSensorReading(),
+        fetchHistoricalReadings(50),
+        fetchActuatorState(),
+      ]);
+      if (cancelled) return;
+      if (latest) setSensorData(latest);
+      if (history.length > 0) setHistoricalData(history);
+      if (actuators) setActuatorStatus(actuators);
+      setHasInitialData(true);
+    })();
 
-      setHistoricalData(prev => {
-        const updated = [
-          ...prev,
-          {
-            timestamp: newData.timestamp,
-            temperature: newData.temperature,
-            pH: newData.pH,
-            dissolvedOxygen: newData.dissolvedOxygen,
-            electricalConductivity: newData.electricalConductivity,
-          },
-        ];
-        return updated.slice(-50);
+    // ---- 2. Realtime: new sensor_readings INSERT pushes ----
+    const sensorChannel = supabase
+      .channel('sensor_readings_stream')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'sensor_readings',
+          filter: `device_id=eq.${DEVICE_ID}`,
+        },
+        (payload) => {
+          const row = payload.new as SensorReadingRow;
+          const reading = mapSensorRow(row);
+          setSensorData(reading);
+
+          setHistoricalData((prev) => {
+            const next = [...prev, mapHistoricalRow(row)];
+            return next.length > 50 ? next.slice(next.length - 50) : next;
+          });
+
+          const newAlerts = checkWaterQuality(reading).filter(
+            (a) => !alertSeenRef.current.has(a.message)
+          );
+          if (newAlerts.length > 0) {
+            newAlerts.forEach((a) => alertSeenRef.current.add(a.message));
+            setAlerts((prev) => [...newAlerts, ...prev].slice(0, 10));
+          }
+        }
+      )
+      .subscribe((status) => {
+        setConnected(status === 'SUBSCRIBED');
       });
 
-      setActuatorStatus({
-        aeration: newData.dissolvedOxygen < 6,
-        waterCirculation:
-          newData.temperature > 26 || newData.pH < 6.8 || newData.pH > 7.5,
-        feeding: false,
-      });
-    }, SENSOR_UPDATE_INTERVAL);
+    // ---- 3. Realtime: actuator_state UPDATE pushes ----
+    const actuatorChannel = supabase
+      .channel('actuator_state_stream')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'actuator_state',
+          filter: `device_id=eq.${DEVICE_ID}`,
+        },
+        (payload) => {
+          const row = payload.new as ActuatorStateRow;
+          if (row) setActuatorStatus(mapActuatorRow(row));
+        }
+      )
+      .subscribe();
 
-    return () => clearInterval(interval);
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(sensorChannel);
+      supabase.removeChannel(actuatorChannel);
+    };
   }, [mounted]);
 
   // ─── Loading screen ────────────────────────────────────────────────────────
@@ -209,8 +266,19 @@ export default function Dashboard() {
     );
   }
 
-  const handleToggleActuator = (actuator: keyof ActuatorStatus) => {
-    setActuatorStatus(prev => ({ ...prev, [actuator]: !prev[actuator] }));
+  const handleToggleActuator = async (actuator: keyof ActuatorStatus) => {
+    // Feeding is momentary: clicking the toggle fires a single feed cycle.
+    // Everything else is a persistent ON/OFF flip.
+    const newState =
+      actuator === 'feeding' ? true : !actuatorStatus[actuator];
+    try {
+      await sendActuatorCommand(actuator, newState);
+    } catch (err) {
+      console.error('[dashboard] sendActuatorCommand failed:', err);
+    }
+    // Intentionally no optimistic setState -- the Supabase subscription
+    // on actuator_state will push the real state once the ESP32 consumes
+    // the command (~3 s latency).
   };
 
   const handleDismissAlert = (id: string) => {
@@ -260,8 +328,18 @@ export default function Dashboard() {
 
               {/* Status chips + clock */}
               <div className="flex items-center gap-2">
-                <StatusChip icon={Activity} label="System Online" active color="#34d399" />
-                <StatusChip icon={Database} label="Sensors Active" active color="#06b6d4" />
+                <StatusChip
+                  icon={Activity}
+                  label={connected ? 'Realtime Online' : 'Connecting…'}
+                  active={connected}
+                  color="#34d399"
+                />
+                <StatusChip
+                  icon={Database}
+                  label={hasInitialData ? 'Sensors Active' : 'No Data'}
+                  active={hasInitialData}
+                  color="#06b6d4"
+                />
                 <div
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs text-slate-500"
                   style={{
