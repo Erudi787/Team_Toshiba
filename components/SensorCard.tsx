@@ -78,7 +78,7 @@ export default function SensorCard({
 }: SensorCardProps) {
   const getValue = () => {
     if (label === 'Temperature') return data.temperature;
-    if (label === 'pH') return data.pH;
+    if (label === 'pH Level') return data.pH;
     if (label === 'Dissolved Oxygen') return data.dissolvedOxygen;
     if (label === 'Electrical Conductivity') return data.electricalConductivity;
     return 0;
