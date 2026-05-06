@@ -68,6 +68,7 @@ export function mapActuatorRow(r: ActuatorStateRow): ActuatorStatus {
     aeration: r.aeration,
     waterCirculation: r.water_circulation,
     feeding: r.feeding,
+    light: r.light,
     lastFeedAt: r.last_feed_at ? new Date(r.last_feed_at) : null,
     feedCountToday: r.feed_count_today ?? 0,
   };
@@ -105,13 +106,14 @@ export async function fetchRecentAlerts(limit = 10): Promise<SystemEvent[]> {
 
 // Subset of ActuatorStatus that maps to a togglable hardware actuator.
 // Excludes informational fields like lastFeedAt / feedCountToday.
-export type ToggleableActuator = 'aeration' | 'waterCirculation' | 'feeding';
+export type ToggleableActuator = 'aeration' | 'waterCirculation' | 'feeding' | 'light';
 
 // Dashboard key (camelCase) → DB enum value (snake_case)
 const dbActuatorKey: Record<ToggleableActuator, string> = {
   aeration: 'aeration',
   waterCirculation: 'water_circulation',
   feeding: 'feeding',
+  light: 'light',
 };
 
 export async function sendActuatorCommand(

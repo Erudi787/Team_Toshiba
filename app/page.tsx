@@ -153,6 +153,7 @@ export default function Dashboard() {
     aeration: false,
     waterCirculation: false,
     feeding: false,
+    light: false,
     lastFeedAt: null,
     feedCountToday: 0,
   });

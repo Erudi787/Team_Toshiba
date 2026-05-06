@@ -2,7 +2,7 @@
 
 import { ActuatorStatus } from '@/types';
 import type { ToggleableActuator } from '@/lib/supabase';
-import { Droplets, Wind, UtensilsCrossed, Info, Clock } from 'lucide-react';
+import { Droplets, Wind, UtensilsCrossed, Info, Clock, Lightbulb } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 interface ControlPanelProps {
@@ -37,6 +37,15 @@ const actuatorConfig = [
     color: '#10b981',
     activeBg: 'rgba(16,185,129,0.08)',
     activeBorder: 'rgba(16,185,129,0.2)',
+  },
+  {
+    key: 'light' as ToggleableActuator,
+    label: 'Light',
+    icon: Lightbulb,
+    description: 'Photoperiod / dark-cycle simulation',
+    color: '#f59e0b',
+    activeBg: 'rgba(245,158,11,0.08)',
+    activeBorder: 'rgba(245,158,11,0.2)',
   },
 ];
 

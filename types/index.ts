@@ -10,6 +10,7 @@ export interface ActuatorStatus {
   aeration: boolean;
   waterCirculation: boolean;
   feeding: boolean;
+  light: boolean;
   lastFeedAt: Date | null;
   feedCountToday: number;
 }
