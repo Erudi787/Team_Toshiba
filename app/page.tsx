@@ -28,6 +28,7 @@ import {
   type SensorReadingRow,
   type ActuatorStateRow,
   type AlertRow,
+  type ToggleableActuator,
 } from '@/lib/supabase';
 import { Activity, Clock, Fish, Database } from 'lucide-react';
 
@@ -294,7 +295,7 @@ export default function Dashboard() {
     );
   }
 
-  const handleToggleActuator = async (actuator: keyof ActuatorStatus) => {
+  const handleToggleActuator = async (actuator: ToggleableActuator) => {
     // Feeding is momentary: clicking the toggle fires a single feed cycle.
     // Everything else is a persistent ON/OFF flip.
     const newState =

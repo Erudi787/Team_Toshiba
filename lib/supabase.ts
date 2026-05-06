@@ -103,15 +103,19 @@ export async function fetchRecentAlerts(limit = 10): Promise<SystemEvent[]> {
   return (data as AlertRow[]).map(mapAlertRow);
 }
 
+// Subset of ActuatorStatus that maps to a togglable hardware actuator.
+// Excludes informational fields like lastFeedAt / feedCountToday.
+export type ToggleableActuator = 'aeration' | 'waterCirculation' | 'feeding';
+
 // Dashboard key (camelCase) → DB enum value (snake_case)
-const dbActuatorKey: Record<keyof ActuatorStatus, string> = {
+const dbActuatorKey: Record<ToggleableActuator, string> = {
   aeration: 'aeration',
   waterCirculation: 'water_circulation',
   feeding: 'feeding',
 };
 
 export async function sendActuatorCommand(
-  actuator: keyof ActuatorStatus,
+  actuator: ToggleableActuator,
   state: boolean
 ): Promise<void> {
   const { error } = await supabase.from('actuator_commands').insert({

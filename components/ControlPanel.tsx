@@ -1,17 +1,18 @@
 'use client';
 
 import { ActuatorStatus } from '@/types';
+import type { ToggleableActuator } from '@/lib/supabase';
 import { Droplets, Wind, UtensilsCrossed, Info, Clock } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 interface ControlPanelProps {
   status: ActuatorStatus;
-  onToggle: (actuator: keyof ActuatorStatus) => void;
+  onToggle: (actuator: ToggleableActuator) => void;
 }
 
 const actuatorConfig = [
   {
-    key: 'aeration' as keyof ActuatorStatus,
+    key: 'aeration' as ToggleableActuator,
     label: 'Aeration System',
     icon: Wind,
     description: 'Controls oxygen levels in water',
@@ -20,7 +21,7 @@ const actuatorConfig = [
     activeBorder: 'rgba(6,182,212,0.2)',
   },
   {
-    key: 'waterCirculation' as keyof ActuatorStatus,
+    key: 'waterCirculation' as ToggleableActuator,
     label: 'Water Circulation',
     icon: Droplets,
     description: 'Maintains water flow and quality',
@@ -29,7 +30,7 @@ const actuatorConfig = [
     activeBorder: 'rgba(99,102,241,0.2)',
   },
   {
-    key: 'feeding' as keyof ActuatorStatus,
+    key: 'feeding' as ToggleableActuator,
     label: 'Feeding System',
     icon: UtensilsCrossed,
     description: 'Automated feeding mechanism',
