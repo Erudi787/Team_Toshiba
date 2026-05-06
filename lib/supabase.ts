@@ -63,13 +63,24 @@ export function mapHistoricalRow(r: SensorReadingRow): HistoricalData {
   };
 }
 
+// Dates before this are considered firmware-clock-not-synced garbage
+// (e.g. a 1970-01-01 written before the NTP guard was added).
+const MIN_VALID_DATE = new Date('2020-01-01T00:00:00Z');
+
+function parseSafeDate(s: string | null | undefined): Date | null {
+  if (!s) return null;
+  const d = new Date(s);
+  if (isNaN(d.getTime()) || d < MIN_VALID_DATE) return null;
+  return d;
+}
+
 export function mapActuatorRow(r: ActuatorStateRow): ActuatorStatus {
   return {
     aeration: r.aeration,
     waterCirculation: r.water_circulation,
     feeding: r.feeding,
     light: r.light,
-    lastFeedAt: r.last_feed_at ? new Date(r.last_feed_at) : null,
+    lastFeedAt: parseSafeDate(r.last_feed_at),
     feedCountToday: r.feed_count_today ?? 0,
   };
 }
