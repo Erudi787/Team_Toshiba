@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { SensorData, ActuatorStatus, Alert, HistoricalData } from '@/types';
+import { SensorData, ActuatorStatus, Alert, HistoricalData, SystemEvent } from '@/types';
 import {
   TemperatureCard,
   PHCard,
@@ -11,6 +11,7 @@ import {
 import AlertPanel from '@/components/AlertPanel';
 import ControlPanel from '@/components/ControlPanel';
 import HistoricalChart from '@/components/HistoricalChart';
+import RecentActivity from '@/components/RecentActivity';
 import { checkWaterQuality, formatTimestamp } from '@/lib/utils';
 import {
   supabase,
@@ -18,14 +19,17 @@ import {
   mapSensorRow,
   mapHistoricalRow,
   mapActuatorRow,
+  mapAlertRow,
   sendActuatorCommand,
   fetchLatestSensorReading,
   fetchHistoricalReadings,
   fetchActuatorState,
+  fetchRecentAlerts,
   type SensorReadingRow,
   type ActuatorStateRow,
+  type AlertRow,
 } from '@/lib/supabase';
-import { Activity, Clock, Fish, Database, Globe } from 'lucide-react';
+import { Activity, Clock, Fish, Database } from 'lucide-react';
 
 // ─── Error Boundary ─────────────────────────────────────────────────────────
 class ErrorBoundary extends React.Component<
@@ -148,7 +152,10 @@ export default function Dashboard() {
     aeration: false,
     waterCirculation: false,
     feeding: false,
+    lastFeedAt: null,
+    feedCountToday: 0,
   });
+  const [recentEvents, setRecentEvents] = useState<SystemEvent[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [historicalData, setHistoricalData] = useState<HistoricalData[]>([]);
   const [connected, setConnected] = useState(false);
@@ -167,17 +174,19 @@ export default function Dashboard() {
 
     let cancelled = false;
 
-    // ---- 1. Initial snapshot (latest reading + history + actuator state) ----
+    // ---- 1. Initial snapshot (latest reading + history + actuator + events) ----
     (async () => {
-      const [latest, history, actuators] = await Promise.all([
+      const [latest, history, actuators, events] = await Promise.all([
         fetchLatestSensorReading(),
         fetchHistoricalReadings(50),
         fetchActuatorState(),
+        fetchRecentAlerts(10),
       ]);
       if (cancelled) return;
       if (latest) setSensorData(latest);
       if (history.length > 0) setHistoricalData(history);
       if (actuators) setActuatorStatus(actuators);
+      setRecentEvents(events);
       setHasInitialData(true);
     })();
 
@@ -233,10 +242,29 @@ export default function Dashboard() {
       )
       .subscribe();
 
+    // ---- 4. Realtime: alerts INSERT pushes (system events) ----
+    const alertsChannel = supabase
+      .channel('alerts_stream')
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'alerts',
+          filter: `device_id=eq.${DEVICE_ID}`,
+        },
+        (payload) => {
+          const row = payload.new as AlertRow;
+          setRecentEvents((prev) => [mapAlertRow(row), ...prev].slice(0, 10));
+        }
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
       supabase.removeChannel(sensorChannel);
       supabase.removeChannel(actuatorChannel);
+      supabase.removeChannel(alertsChannel);
     };
   }, [mounted]);
 
@@ -415,90 +443,10 @@ export default function Dashboard() {
             </div>
           </section>
 
-          {/* ── System Status ────────────────────────────────────────────── */}
+          {/* ── Recent Activity (firmware-pushed system events) ─────────── */}
           <section>
-            <SectionHeader title="System Status" />
-            <div
-              className="glass rounded-2xl border border-white/[0.06] p-5"
-              style={{ boxShadow: '0 4px 32px rgba(0,0,0,0.35)' }}
-            >
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* Data collection */}
-                <div
-                  className="flex items-start gap-3 rounded-xl p-4"
-                  style={{
-                    background: 'rgba(52,211,153,0.05)',
-                    border: '1px solid rgba(52,211,153,0.12)',
-                  }}
-                >
-                  <div
-                    className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: 'rgba(52,211,153,0.1)' }}
-                  >
-                    <Database className="w-4 h-4 text-emerald-400" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="text-sm font-semibold text-slate-200">Data Collection</span>
-                      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full">
-                        ACTIVE
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500">Sensors updating every 5 seconds</p>
-                  </div>
-                </div>
-
-                {/* Automated control */}
-                <div
-                  className="flex items-start gap-3 rounded-xl p-4"
-                  style={{
-                    background: 'rgba(6,182,212,0.05)',
-                    border: '1px solid rgba(6,182,212,0.12)',
-                  }}
-                >
-                  <div
-                    className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: 'rgba(6,182,212,0.1)' }}
-                  >
-                    <Activity className="w-4 h-4 text-cyan-400" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="text-sm font-semibold text-slate-200">Auto Control</span>
-                      <span className="text-[10px] font-bold text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded-full">
-                        ENABLED
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500">Actuators responding to sensor data</p>
-                  </div>
-                </div>
-
-                {/* Remote access */}
-                <div
-                  className="flex items-start gap-3 rounded-xl p-4"
-                  style={{
-                    background: 'rgba(139,92,246,0.05)',
-                    border: '1px solid rgba(139,92,246,0.12)',
-                  }}
-                >
-                  <div
-                    className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
-                    style={{ background: 'rgba(139,92,246,0.1)' }}
-                  >
-                    <Globe className="w-4 h-4 text-violet-400" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-1.5 mb-0.5">
-                      <span className="text-sm font-semibold text-slate-200">Remote Access</span>
-                      <span className="text-[10px] font-bold text-violet-400 bg-violet-400/10 px-1.5 py-0.5 rounded-full">
-                        ONLINE
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-500">Dashboard accessible remotely</p>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <SectionHeader title="System Activity" />
+            <RecentActivity events={recentEvents} />
           </section>
 
           {/* Footer */}

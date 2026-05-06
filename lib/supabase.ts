@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { SensorData, ActuatorStatus, HistoricalData } from '@/types';
+import type { SensorData, ActuatorStatus, HistoricalData, SystemEvent } from '@/types';
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -68,7 +68,39 @@ export function mapActuatorRow(r: ActuatorStateRow): ActuatorStatus {
     aeration: r.aeration,
     waterCirculation: r.water_circulation,
     feeding: r.feeding,
+    lastFeedAt: r.last_feed_at ? new Date(r.last_feed_at) : null,
+    feedCountToday: r.feed_count_today ?? 0,
   };
+}
+
+export interface AlertRow {
+  id: number;
+  device_id: string;
+  type: 'info' | 'warning' | 'error';
+  parameter: string | null;
+  message: string;
+  created_at: string;
+}
+
+export function mapAlertRow(r: AlertRow): SystemEvent {
+  return {
+    id: r.id,
+    type: r.type,
+    parameter: r.parameter,
+    message: r.message,
+    timestamp: new Date(r.created_at),
+  };
+}
+
+export async function fetchRecentAlerts(limit = 10): Promise<SystemEvent[]> {
+  const { data, error } = await supabase
+    .from('alerts')
+    .select('*')
+    .eq('device_id', DEVICE_ID)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error || !data) return [];
+  return (data as AlertRow[]).map(mapAlertRow);
 }
 
 // Dashboard key (camelCase) → DB enum value (snake_case)

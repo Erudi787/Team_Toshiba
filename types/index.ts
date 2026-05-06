@@ -10,6 +10,16 @@ export interface ActuatorStatus {
   aeration: boolean;
   waterCirculation: boolean;
   feeding: boolean;
+  lastFeedAt: Date | null;
+  feedCountToday: number;
+}
+
+export interface SystemEvent {
+  id: number;
+  type: 'info' | 'warning' | 'error';
+  parameter: string | null;
+  message: string;
+  timestamp: Date;
 }
 
 export interface Alert {

@@ -1,7 +1,8 @@
 'use client';
 
 import { ActuatorStatus } from '@/types';
-import { Droplets, Wind, UtensilsCrossed, Info } from 'lucide-react';
+import { Droplets, Wind, UtensilsCrossed, Info, Clock } from 'lucide-react';
+import { useEffect, useState } from 'react';
 
 interface ControlPanelProps {
   status: ActuatorStatus;
@@ -131,9 +132,15 @@ export default function ControlPanel({ status, onToggle }: ControlPanelProps) {
         })}
       </div>
 
+      {/* Last-feed indicator */}
+      <FeedingStatus
+        lastFeedAt={status.lastFeedAt}
+        feedCountToday={status.feedCountToday}
+      />
+
       {/* Info footer */}
       <div
-        className="mt-4 flex items-start gap-2.5 rounded-xl p-3.5"
+        className="mt-3 flex items-start gap-2.5 rounded-xl p-3.5"
         style={{
           background: 'rgba(6,182,212,0.05)',
           border: '1px solid rgba(6,182,212,0.1)',
@@ -147,6 +154,52 @@ export default function ControlPanel({ status, onToggle }: ControlPanelProps) {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Feeding status (last fed + daily count) ────────────────────────────────
+function FeedingStatus({
+  lastFeedAt,
+  feedCountToday,
+}: {
+  lastFeedAt: Date | null;
+  feedCountToday: number;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  let label: string;
+  if (!lastFeedAt) {
+    label = 'Never';
+  } else {
+    const diffMs = now.getTime() - lastFeedAt.getTime();
+    const sec = Math.max(0, Math.floor(diffMs / 1000));
+    if (sec < 60) label = `${sec}s ago`;
+    else if (sec < 3600) label = `${Math.floor(sec / 60)} min ago`;
+    else if (sec < 86400) label = `${Math.floor(sec / 3600)}h ago`;
+    else label = `${Math.floor(sec / 86400)}d ago`;
+  }
+
+  return (
+    <div
+      className="mt-4 flex items-center gap-2.5 rounded-xl px-3.5 py-2.5"
+      style={{
+        background: 'rgba(16,185,129,0.05)',
+        border: '1px solid rgba(16,185,129,0.12)',
+      }}
+    >
+      <Clock className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+      <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2">
+        <span className="text-[11px] text-slate-500">Last feed</span>
+        <span className="text-xs font-semibold text-emerald-300 tabular-nums">{label}</span>
+      </div>
+      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full tabular-nums">
+        {feedCountToday} today
+      </span>
     </div>
   );
 }
