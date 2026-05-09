@@ -283,6 +283,64 @@ export default function Dashboard() {
     };
   }, [mounted]);
 
+  // Clear pending markers when the actuator state arrives matching what
+  // we asked for. For aeration/light/waterCirculation we compare boolean
+  // state; for feeding we watch feedCountToday increment.
+  useEffect(() => {
+    setActuatorUi((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      const togglable: ToggleableActuator[] = [
+        'aeration',
+        'waterCirculation',
+        'light',
+      ];
+      for (const key of togglable) {
+        const p = next[key].pending;
+        if (p && actuatorStatus[key] === p.expected) {
+          next[key] = {};
+          changed = true;
+        }
+      }
+      const feedPending = next.feeding.pending;
+      if (
+        feedPending &&
+        feedPending.expectedFeedCount !== undefined &&
+        actuatorStatus.feedCountToday >= feedPending.expectedFeedCount
+      ) {
+        next.feeding = {};
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [actuatorStatus]);
+
+  // If a pending toggle isn't acknowledged within 12s, mark it as an
+  // error so the user knows something went wrong (likely an ESP32-side
+  // HTTP failure picking up the command).
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    (Object.keys(actuatorUi) as ToggleableActuator[]).forEach((key) => {
+      if (!actuatorUi[key].pending) return;
+      const t = setTimeout(() => {
+        setActuatorUi((prev) => {
+          if (!prev[key].pending) return prev;
+          return { ...prev, [key]: { error: 'No response from device' } };
+        });
+        // Auto-clear that error after 5s too
+        setTimeout(() => {
+          setActuatorUi((prev) =>
+            prev[key].error === 'No response from device'
+              ? { ...prev, [key]: {} }
+              : prev
+          );
+        }, 5000);
+      }, 12000);
+      timers.push(t);
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [actuatorUi]);
+
   // ─── Loading screen ────────────────────────────────────────────────────────
   if (!mounted) {
     return (
@@ -353,64 +411,6 @@ export default function Dashboard() {
   const handleDismissAlert = (id: string) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
   };
-
-  // Clear pending markers when the actuator state arrives matching what
-  // we asked for. For aeration/light/waterCirculation we compare boolean
-  // state; for feeding we watch feedCountToday increment.
-  useEffect(() => {
-    setActuatorUi((prev) => {
-      let changed = false;
-      const next = { ...prev };
-      const togglable: ToggleableActuator[] = [
-        'aeration',
-        'waterCirculation',
-        'light',
-      ];
-      for (const key of togglable) {
-        const p = next[key].pending;
-        if (p && actuatorStatus[key] === p.expected) {
-          next[key] = {};
-          changed = true;
-        }
-      }
-      const feedPending = next.feeding.pending;
-      if (
-        feedPending &&
-        feedPending.expectedFeedCount !== undefined &&
-        actuatorStatus.feedCountToday >= feedPending.expectedFeedCount
-      ) {
-        next.feeding = {};
-        changed = true;
-      }
-      return changed ? next : prev;
-    });
-  }, [actuatorStatus]);
-
-  // If a pending toggle isn't acknowledged within 12s, mark it as an
-  // error so the user knows something went wrong (likely an ESP32-side
-  // HTTP failure picking up the command).
-  useEffect(() => {
-    const timers: ReturnType<typeof setTimeout>[] = [];
-    (Object.keys(actuatorUi) as ToggleableActuator[]).forEach((key) => {
-      if (!actuatorUi[key].pending) return;
-      const t = setTimeout(() => {
-        setActuatorUi((prev) => {
-          if (!prev[key].pending) return prev;
-          return { ...prev, [key]: { error: 'No response from device' } };
-        });
-        // Auto-clear that error after 5s too
-        setTimeout(() => {
-          setActuatorUi((prev) =>
-            prev[key].error === 'No response from device'
-              ? { ...prev, [key]: {} }
-              : prev
-          );
-        }, 5000);
-      }, 12000);
-      timers.push(t);
-    });
-    return () => timers.forEach(clearTimeout);
-  }, [actuatorUi]);
 
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
