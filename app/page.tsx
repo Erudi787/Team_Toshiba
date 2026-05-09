@@ -159,12 +159,21 @@ export default function Dashboard() {
   });
   const [recentEvents, setRecentEvents] = useState<SystemEvent[]>([]);
 
-  // Per-actuator UI feedback for the toggles. `pending` = command sent,
-  // waiting for ESP32 ack. `error` = send failed or ESP32 didn't ack
-  // within the timeout. Both auto-clear (pending on Realtime confirm,
-  // error after a few seconds).
+  // Per-actuator UI feedback for the toggles. `pending` = command in flight.
+  //   pending.sentOk=false: still trying to insert into Supabase
+  //   pending.sentOk=true:  Supabase row inserted, waiting for ESP32 to ack
+  // `error` = either send failed or ESP32 didn't ack within the timeout.
+  // The distinction matters for messaging -- sentOk=true means the command
+  // was delivered and the action probably happened on the device, but the
+  // confirmation upload from the device failed (very common with weak WiFi).
   const [actuatorUi, setActuatorUi] = useState<
-    Record<ToggleableActuator, { pending?: { expected: boolean; expectedFeedCount?: number }; error?: string }>
+    Record<
+      ToggleableActuator,
+      {
+        pending?: { expected: boolean; expectedFeedCount?: number; sentOk: boolean };
+        error?: string;
+      }
+    >
   >({
     aeration: {},
     waterCirculation: {},
@@ -270,7 +279,16 @@ export default function Dashboard() {
         },
         (payload) => {
           const row = payload.new as AlertRow;
-          setRecentEvents((prev) => [mapAlertRow(row), ...prev].slice(0, 10));
+          const event = mapAlertRow(row);
+          setRecentEvents((prev) => [event, ...prev].slice(0, 10));
+          // Parallel confirmation path: a "Feed #N dispensed" alert
+          // proves the feed fired even if the actuator_state upsert
+          // failed. Clear any pending feeding spinner immediately.
+          if (event.parameter === 'feeding') {
+            setActuatorUi((prev) =>
+              prev.feeding.pending ? { ...prev, feeding: {} } : prev
+            );
+          }
         }
       )
       .subscribe();
@@ -315,27 +333,35 @@ export default function Dashboard() {
     });
   }, [actuatorStatus]);
 
-  // If a pending toggle isn't acknowledged within 12s, mark it as an
-  // error so the user knows something went wrong (likely an ESP32-side
-  // HTTP failure picking up the command).
+  // If a pending toggle isn't acknowledged within 15s, mark it as an
+  // error. The error message depends on whether the dashboard actually
+  // managed to send the command -- "send failed" vs "command delivered
+  // but device didn't confirm back" are very different problems.
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];
     (Object.keys(actuatorUi) as ToggleableActuator[]).forEach((key) => {
-      if (!actuatorUi[key].pending) return;
+      const pending = actuatorUi[key].pending;
+      if (!pending) return;
       const t = setTimeout(() => {
         setActuatorUi((prev) => {
-          if (!prev[key].pending) return prev;
-          return { ...prev, [key]: { error: 'No response from device' } };
+          const p = prev[key].pending;
+          if (!p) return prev;
+          const errorMsg = p.sentOk
+            ? key === 'feeding'
+              ? 'Sent — feeder may have fired but device didn\'t confirm'
+              : 'Sent — device didn\'t confirm new state'
+            : 'Could not reach Supabase';
+          return { ...prev, [key]: { error: errorMsg } };
         });
-        // Auto-clear that error after 5s too
+        // Auto-clear that error after 6s
         setTimeout(() => {
           setActuatorUi((prev) =>
-            prev[key].error === 'No response from device'
+            prev[key].error
               ? { ...prev, [key]: {} }
               : prev
           );
-        }, 5000);
-      }, 12000);
+        }, 6000);
+      }, 15000);
       timers.push(t);
     });
     return () => timers.forEach(clearTimeout);
@@ -384,25 +410,36 @@ export default function Dashboard() {
             actuator === 'feeding'
               ? actuatorStatus.feedCountToday + 1
               : undefined,
+          sentOk: false,
         },
       },
     }));
 
     try {
       await sendActuatorCommand(actuator, newState);
-      // Pending will auto-clear via the actuatorStatus effect below
-      // when the ESP32 upserts the new state.
+      // Send went through to Supabase. Now waiting for ESP32 to poll +
+      // execute + upsert. Mark sentOk so the timeout error message can
+      // differentiate "send failed" from "device didn't confirm".
+      setActuatorUi((prev) => {
+        const cur = prev[actuator].pending;
+        if (!cur) return prev; // already cleared
+        return {
+          ...prev,
+          [actuator]: { pending: { ...cur, sentOk: true } },
+        };
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Send failed';
       console.error('[dashboard] sendActuatorCommand failed:', err);
       setActuatorUi((prev) => ({
         ...prev,
-        [actuator]: { error: msg },
+        [actuator]: { error: `Couldn't send: ${msg}` },
       }));
-      // Auto-clear error after 5s
       setTimeout(() => {
         setActuatorUi((prev) =>
-          prev[actuator].error === msg ? { ...prev, [actuator]: {} } : prev
+          prev[actuator].error?.startsWith("Couldn't send")
+            ? { ...prev, [actuator]: {} }
+            : prev
         );
       }, 5000);
     }
