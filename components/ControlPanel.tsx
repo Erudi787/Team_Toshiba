@@ -2,12 +2,27 @@
 
 import { ActuatorStatus } from '@/types';
 import type { ToggleableActuator } from '@/lib/supabase';
-import { Droplets, Wind, UtensilsCrossed, Info, Clock, Lightbulb } from 'lucide-react';
+import {
+  Droplets,
+  Wind,
+  UtensilsCrossed,
+  Info,
+  Clock,
+  Lightbulb,
+  Loader2,
+  AlertCircle,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
+
+export interface ActuatorUiInfo {
+  pending?: { expected: boolean; expectedFeedCount?: number };
+  error?: string;
+}
 
 interface ControlPanelProps {
   status: ActuatorStatus;
   onToggle: (actuator: ToggleableActuator) => void;
+  uiInfo?: Record<ToggleableActuator, ActuatorUiInfo>;
 }
 
 const actuatorConfig = [
@@ -49,7 +64,7 @@ const actuatorConfig = [
   },
 ];
 
-export default function ControlPanel({ status, onToggle }: ControlPanelProps) {
+export default function ControlPanel({ status, onToggle, uiInfo }: Readonly<ControlPanelProps>) {
   return (
     <div
       className="glass rounded-2xl border border-white/[0.06] p-5 flex flex-col"
@@ -68,75 +83,109 @@ export default function ControlPanel({ status, onToggle }: ControlPanelProps) {
         {actuatorConfig.map((actuator) => {
           const isActive = status[actuator.key];
           const Icon = actuator.icon;
+          const info = uiInfo?.[actuator.key];
+          const isPending = !!info?.pending;
+          const errorMsg = info?.error;
 
           return (
             <div
               key={actuator.key}
-              className="flex items-center gap-3 rounded-xl px-4 py-3.5 transition-all duration-300"
+              className="flex flex-col gap-1.5 rounded-xl px-4 py-3.5 transition-all duration-300"
               style={{
                 background: isActive ? actuator.activeBg : 'rgba(255,255,255,0.02)',
-                border: `1px solid ${isActive ? actuator.activeBorder : 'rgba(255,255,255,0.05)'}`,
+                border: `1px solid ${
+                  errorMsg
+                    ? 'rgba(248,113,113,0.4)'
+                    : isPending
+                    ? 'rgba(96,165,250,0.4)'
+                    : isActive
+                    ? actuator.activeBorder
+                    : 'rgba(255,255,255,0.05)'
+                }`,
                 boxShadow: isActive ? `0 0 16px ${actuator.color}18` : 'none',
               }}
             >
-              {/* Icon */}
-              <div
-                className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 transition-all duration-300"
-                style={{
-                  background: isActive ? `${actuator.color}20` : 'rgba(255,255,255,0.04)',
-                  border: `1px solid ${isActive ? `${actuator.color}30` : 'rgba(255,255,255,0.06)'}`,
-                }}
-              >
-                <Icon
-                  className="w-4 h-4 transition-colors duration-300"
-                  style={{ color: isActive ? actuator.color : '#64748b' }}
-                />
-              </div>
-
-              {/* Label + description */}
-              <div className="flex-1 min-w-0">
-                <p
-                  className="text-sm font-semibold transition-colors duration-300 truncate"
-                  style={{ color: isActive ? '#f8fafc' : '#94a3b8' }}
-                >
-                  {actuator.label}
-                </p>
-                <p className="text-[11px] text-slate-600 truncate">{actuator.description}</p>
-              </div>
-
-              {/* Status + Toggle */}
-              <div className="flex items-center gap-2.5 flex-shrink-0">
-                <span
-                  className="text-[11px] font-bold uppercase tracking-widest transition-colors duration-300"
-                  style={{ color: isActive ? actuator.color : '#475569' }}
-                >
-                  {isActive ? 'ON' : 'OFF'}
-                </span>
-
-                {/* Toggle switch */}
-                <button
-                  onClick={() => onToggle(actuator.key)}
-                  className="relative w-11 h-6 rounded-full transition-all duration-300 focus:outline-none"
+              <div className="flex items-center gap-3">
+                {/* Icon */}
+                <div
+                  className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 transition-all duration-300"
                   style={{
-                    background: isActive
-                      ? `linear-gradient(135deg, ${actuator.color}, ${actuator.color}cc)`
-                      : 'rgba(255,255,255,0.08)',
-                    border: `1px solid ${isActive ? actuator.color + '60' : 'rgba(255,255,255,0.1)'}`,
-                    boxShadow: isActive ? `0 0 12px ${actuator.color}40` : 'none',
+                    background: isActive ? `${actuator.color}20` : 'rgba(255,255,255,0.04)',
+                    border: `1px solid ${isActive ? `${actuator.color}30` : 'rgba(255,255,255,0.06)'}`,
                   }}
-                  aria-label={`Toggle ${actuator.label}`}
                 >
-                  <span
-                    className="absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all duration-300"
-                    style={{
-                      left: isActive ? 'calc(100% - 22px)' : '2px',
-                      boxShadow: isActive
-                        ? `0 1px 4px ${actuator.color}60, 0 0 0 1px ${actuator.color}20`
-                        : '0 1px 4px rgba(0,0,0,0.3)',
-                    }}
+                  <Icon
+                    className="w-4 h-4 transition-colors duration-300"
+                    style={{ color: isActive ? actuator.color : '#64748b' }}
                   />
-                </button>
+                </div>
+
+                {/* Label + description */}
+                <div className="flex-1 min-w-0">
+                  <p
+                    className="text-sm font-semibold transition-colors duration-300 truncate"
+                    style={{ color: isActive ? '#f8fafc' : '#94a3b8' }}
+                  >
+                    {actuator.label}
+                  </p>
+                  <p className="text-[11px] text-slate-600 truncate">{actuator.description}</p>
+                </div>
+
+                {/* Status + Toggle */}
+                <div className="flex items-center gap-2.5 flex-shrink-0">
+                  {isPending ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-widest text-blue-400">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Sending
+                    </span>
+                  ) : (
+                    <span
+                      className="text-[11px] font-bold uppercase tracking-widest transition-colors duration-300"
+                      style={{ color: isActive ? actuator.color : '#475569' }}
+                    >
+                      {isActive ? 'ON' : 'OFF'}
+                    </span>
+                  )}
+
+                  {/* Toggle switch */}
+                  <button
+                    onClick={() => onToggle(actuator.key)}
+                    disabled={isPending}
+                    className="relative w-11 h-6 rounded-full transition-all duration-300 focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                    style={{
+                      background: isActive
+                        ? `linear-gradient(135deg, ${actuator.color}, ${actuator.color}cc)`
+                        : 'rgba(255,255,255,0.08)',
+                      border: `1px solid ${isActive ? actuator.color + '60' : 'rgba(255,255,255,0.1)'}`,
+                      boxShadow: isActive ? `0 0 12px ${actuator.color}40` : 'none',
+                    }}
+                    aria-label={`Toggle ${actuator.label}`}
+                  >
+                    <span
+                      className="absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-all duration-300"
+                      style={{
+                        left: isActive ? 'calc(100% - 22px)' : '2px',
+                        boxShadow: isActive
+                          ? `0 1px 4px ${actuator.color}60, 0 0 0 1px ${actuator.color}20`
+                          : '0 1px 4px rgba(0,0,0,0.3)',
+                      }}
+                    />
+                  </button>
+                </div>
               </div>
+
+              {/* Inline status feedback below the row */}
+              {errorMsg && (
+                <div className="flex items-center gap-1.5 text-[11px] text-red-400 pl-12">
+                  <AlertCircle className="w-3 h-3 flex-shrink-0" />
+                  <span className="truncate">{errorMsg}</span>
+                </div>
+              )}
+              {isPending && !errorMsg && (
+                <div className="text-[11px] text-blue-400/80 pl-12">
+                  Waiting for device acknowledgement…
+                </div>
+              )}
             </div>
           );
         })}

@@ -158,6 +158,19 @@ export default function Dashboard() {
     feedCountToday: 0,
   });
   const [recentEvents, setRecentEvents] = useState<SystemEvent[]>([]);
+
+  // Per-actuator UI feedback for the toggles. `pending` = command sent,
+  // waiting for ESP32 ack. `error` = send failed or ESP32 didn't ack
+  // within the timeout. Both auto-clear (pending on Realtime confirm,
+  // error after a few seconds).
+  const [actuatorUi, setActuatorUi] = useState<
+    Record<ToggleableActuator, { pending?: { expected: boolean; expectedFeedCount?: number }; error?: string }>
+  >({
+    aeration: {},
+    waterCirculation: {},
+    feeding: {},
+    light: {},
+  });
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [historicalData, setHistoricalData] = useState<HistoricalData[]>([]);
   const [connected, setConnected] = useState(false);
@@ -301,19 +314,103 @@ export default function Dashboard() {
     // Everything else is a persistent ON/OFF flip.
     const newState =
       actuator === 'feeding' ? true : !actuatorStatus[actuator];
+
+    // Mark as pending. For feeding we track the expected feed count
+    // so we know when the device acks (count increment).
+    setActuatorUi((prev) => ({
+      ...prev,
+      [actuator]: {
+        pending: {
+          expected: newState,
+          expectedFeedCount:
+            actuator === 'feeding'
+              ? actuatorStatus.feedCountToday + 1
+              : undefined,
+        },
+      },
+    }));
+
     try {
       await sendActuatorCommand(actuator, newState);
+      // Pending will auto-clear via the actuatorStatus effect below
+      // when the ESP32 upserts the new state.
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Send failed';
       console.error('[dashboard] sendActuatorCommand failed:', err);
+      setActuatorUi((prev) => ({
+        ...prev,
+        [actuator]: { error: msg },
+      }));
+      // Auto-clear error after 5s
+      setTimeout(() => {
+        setActuatorUi((prev) =>
+          prev[actuator].error === msg ? { ...prev, [actuator]: {} } : prev
+        );
+      }, 5000);
     }
-    // Intentionally no optimistic setState -- the Supabase subscription
-    // on actuator_state will push the real state once the ESP32 consumes
-    // the command (~3 s latency).
   };
 
   const handleDismissAlert = (id: string) => {
     setAlerts(prev => prev.filter(a => a.id !== id));
   };
+
+  // Clear pending markers when the actuator state arrives matching what
+  // we asked for. For aeration/light/waterCirculation we compare boolean
+  // state; for feeding we watch feedCountToday increment.
+  useEffect(() => {
+    setActuatorUi((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      const togglable: ToggleableActuator[] = [
+        'aeration',
+        'waterCirculation',
+        'light',
+      ];
+      for (const key of togglable) {
+        const p = next[key].pending;
+        if (p && actuatorStatus[key] === p.expected) {
+          next[key] = {};
+          changed = true;
+        }
+      }
+      const feedPending = next.feeding.pending;
+      if (
+        feedPending &&
+        feedPending.expectedFeedCount !== undefined &&
+        actuatorStatus.feedCountToday >= feedPending.expectedFeedCount
+      ) {
+        next.feeding = {};
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [actuatorStatus]);
+
+  // If a pending toggle isn't acknowledged within 12s, mark it as an
+  // error so the user knows something went wrong (likely an ESP32-side
+  // HTTP failure picking up the command).
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    (Object.keys(actuatorUi) as ToggleableActuator[]).forEach((key) => {
+      if (!actuatorUi[key].pending) return;
+      const t = setTimeout(() => {
+        setActuatorUi((prev) => {
+          if (!prev[key].pending) return prev;
+          return { ...prev, [key]: { error: 'No response from device' } };
+        });
+        // Auto-clear that error after 5s too
+        setTimeout(() => {
+          setActuatorUi((prev) =>
+            prev[key].error === 'No response from device'
+              ? { ...prev, [key]: {} }
+              : prev
+          );
+        }, 5000);
+      }, 12000);
+      timers.push(t);
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [actuatorUi]);
 
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
@@ -406,7 +503,11 @@ export default function Dashboard() {
             <SectionHeader title="Alerts & Controls" />
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <AlertPanel alerts={alerts} onDismiss={handleDismissAlert} />
-              <ControlPanel status={actuatorStatus} onToggle={handleToggleActuator} />
+              <ControlPanel
+                status={actuatorStatus}
+                onToggle={handleToggleActuator}
+                uiInfo={actuatorUi}
+              />
             </div>
           </section>
 
