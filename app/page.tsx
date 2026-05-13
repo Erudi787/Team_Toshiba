@@ -1,7 +1,16 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { SensorData, ActuatorStatus, Alert, HistoricalData, SystemEvent } from '@/types';
+import {
+  SensorData,
+  ActuatorStatus,
+  Alert,
+  HistoricalData,
+  SystemEvent,
+  DeviceSettings,
+  HistoricalRangeKey,
+  HISTORICAL_RANGES,
+} from '@/types';
 import {
   TemperatureCard,
   PHCard,
@@ -9,7 +18,7 @@ import {
   ElectricalConductivityCard,
 } from '@/components/SensorCard';
 import AlertPanel from '@/components/AlertPanel';
-import ControlPanel from '@/components/ControlPanel';
+import ControlPanel, { type FeedScheduleUi } from '@/components/ControlPanel';
 import HistoricalChart from '@/components/HistoricalChart';
 import RecentActivity from '@/components/RecentActivity';
 import { checkWaterQuality, formatTimestamp } from '@/lib/utils';
@@ -20,14 +29,18 @@ import {
   mapHistoricalRow,
   mapActuatorRow,
   mapAlertRow,
+  mapDeviceSettingsRow,
   sendActuatorCommand,
   fetchLatestSensorReading,
-  fetchHistoricalReadings,
+  fetchHistoricalReadingsByRange,
   fetchActuatorState,
   fetchRecentAlerts,
+  fetchDeviceSettings,
+  updateFeedInterval,
   type SensorReadingRow,
   type ActuatorStateRow,
   type AlertRow,
+  type DeviceSettingsRow,
   type ToggleableActuator,
 } from '@/lib/supabase';
 import { Activity, Clock, Fish, Database } from 'lucide-react';
@@ -111,6 +124,44 @@ function SectionHeader({
   );
 }
 
+// ─── Time-range picker (Historical Trends) ──────────────────────────────────
+// Compact pill row with the supported ranges. Visually mirrors the
+// FeedSchedule preset chips so the dashboard feels consistent.
+function TimeRangePicker({
+  value,
+  onChange,
+}: {
+  value: HistoricalRangeKey;
+  onChange: (k: HistoricalRangeKey) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {HISTORICAL_RANGES.map((r) => {
+        const selected = r.key === value;
+        return (
+          <button
+            key={r.key}
+            onClick={() => onChange(r.key)}
+            className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 focus:outline-none"
+            style={{
+              background: selected
+                ? 'rgba(6,182,212,0.18)'
+                : 'rgba(255,255,255,0.03)',
+              color: selected ? '#67e8f9' : '#94a3b8',
+              border: `1px solid ${
+                selected ? 'rgba(6,182,212,0.35)' : 'rgba(255,255,255,0.06)'
+              }`,
+            }}
+            aria-pressed={selected}
+          >
+            {r.key}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Status Chip ─────────────────────────────────────────────────────────────
 function StatusChip({
   icon: Icon,
@@ -156,7 +207,11 @@ export default function Dashboard() {
     light: false,
     lastFeedAt: null,
     feedCountToday: 0,
+    feedIntervalMinutesActive: null,
   });
+  const [deviceSettings, setDeviceSettings] = useState<DeviceSettings | null>(null);
+  const [scheduleUi, setScheduleUi] = useState<FeedScheduleUi>({});
+  const [historicalRange, setHistoricalRange] = useState<HistoricalRangeKey>('1h');
   const [recentEvents, setRecentEvents] = useState<SystemEvent[]>([]);
 
   // Per-actuator UI feedback for the toggles. `pending` = command in flight.
@@ -198,19 +253,23 @@ export default function Dashboard() {
 
     let cancelled = false;
 
-    // ---- 1. Initial snapshot (latest reading + history + actuator + events) ----
+    // ---- 1. Initial snapshot (everything *except* history) ----
+    // History is fetched in a separate effect that re-runs when the user
+    // picks a different time range. Splitting them keeps the dependency
+    // array clean and avoids re-establishing realtime subscriptions on a
+    // range change.
     (async () => {
-      const [latest, history, actuators, events] = await Promise.all([
+      const [latest, actuators, events, settings] = await Promise.all([
         fetchLatestSensorReading(),
-        fetchHistoricalReadings(50),
         fetchActuatorState(),
         fetchRecentAlerts(10),
+        fetchDeviceSettings(),
       ]);
       if (cancelled) return;
       if (latest) setSensorData(latest);
-      if (history.length > 0) setHistoricalData(history);
       if (actuators) setActuatorStatus(actuators);
       setRecentEvents(events);
+      if (settings) setDeviceSettings(settings);
       setHasInitialData(true);
     })();
 
@@ -232,7 +291,9 @@ export default function Dashboard() {
 
           setHistoricalData((prev) => {
             const next = [...prev, mapHistoricalRow(row)];
-            return next.length > 50 ? next.slice(next.length - 50) : next;
+            // Cap to the same max we use for fetchHistoricalReadingsByRange()
+            // so the in-memory buffer can't grow unbounded across long sessions.
+            return next.length > 2000 ? next.slice(next.length - 2000) : next;
           });
 
           const newAlerts = checkWaterQuality(reading).filter(
@@ -293,13 +354,52 @@ export default function Dashboard() {
       )
       .subscribe();
 
+    // ---- 5. Realtime: device_settings UPDATE pushes ----
+    // So when the operator changes the feed interval from another tab/device,
+    // every open dashboard reflects the new value immediately.
+    const settingsChannel = supabase
+      .channel('device_settings_stream')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'device_settings',
+          filter: `device_id=eq.${DEVICE_ID}`,
+        },
+        (payload) => {
+          const row = payload.new as DeviceSettingsRow;
+          if (row) setDeviceSettings(mapDeviceSettingsRow(row));
+        }
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
       supabase.removeChannel(sensorChannel);
       supabase.removeChannel(actuatorChannel);
       supabase.removeChannel(alertsChannel);
+      supabase.removeChannel(settingsChannel);
     };
   }, [mounted]);
+
+  // ─── History fetch (re-runs on range change) ───────────────────────────────
+  useEffect(() => {
+    if (!mounted) return;
+    let cancelled = false;
+    const rangeMinutes =
+      HISTORICAL_RANGES.find((r) => r.key === historicalRange)?.minutes ?? 60;
+    (async () => {
+      const history = await fetchHistoricalReadingsByRange(rangeMinutes);
+      if (cancelled) return;
+      // Replace, don't merge -- the previous range's data points may sit
+      // outside the new window and would be misleading on the chart.
+      setHistoricalData(history);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mounted, historicalRange]);
 
   // Clear pending markers when the actuator state arrives matching what
   // we asked for. For aeration/light/waterCirculation we compare boolean
@@ -449,6 +549,42 @@ export default function Dashboard() {
     setAlerts(prev => prev.filter(a => a.id !== id));
   };
 
+  const handleChangeFeedInterval = async (minutes: number) => {
+    // Optimistic UI: remember what the user clicked so the FeedSchedule
+    // panel can show the new value immediately even before device_settings'
+    // realtime push lands. Cleared once `deviceSettings.feedIntervalMinutes`
+    // catches up (effect below) or on error.
+    setScheduleUi({ pending: true, pendingValue: minutes });
+    try {
+      await updateFeedInterval(minutes);
+      // Success: leave pendingValue set until device_settings echoes back via
+      // realtime; that effect clears it. The subsequent reload_settings poll
+      // (~3s) drives the firmware to start using the new interval, which in
+      // turn surfaces as actuator_state.feed_interval_minutes -- the
+      // "applying" badge on FeedSchedule clears at that point.
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Send failed';
+      console.error('[dashboard] updateFeedInterval failed:', err);
+      setScheduleUi({ error: `Couldn't update: ${msg}` });
+      setTimeout(() => {
+        setScheduleUi((prev) => (prev.error ? {} : prev));
+      }, 5000);
+    }
+  };
+
+  // Clear the scheduleUi pending marker once device_settings catches up
+  // with what we wrote. This is the "save confirmed" moment from the
+  // user's perspective; the separate "applying" badge stays on until the
+  // firmware reports back via actuator_state.feed_interval_minutes.
+  useEffect(() => {
+    if (
+      scheduleUi.pendingValue != null &&
+      deviceSettings?.feedIntervalMinutes === scheduleUi.pendingValue
+    ) {
+      setScheduleUi({});
+    }
+  }, [deviceSettings?.feedIntervalMinutes, scheduleUi.pendingValue]);
+
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
     <ErrorBoundary>
@@ -544,13 +680,22 @@ export default function Dashboard() {
                 status={actuatorStatus}
                 onToggle={handleToggleActuator}
                 uiInfo={actuatorUi}
+                settings={deviceSettings}
+                onChangeFeedInterval={handleChangeFeedInterval}
+                scheduleUi={scheduleUi}
               />
             </div>
           </section>
 
           {/* ── Historical Charts ────────────────────────────────────────── */}
           <section>
-            <SectionHeader title="Historical Trends" />
+            <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
+              <SectionHeader title="Historical Trends" />
+              <TimeRangePicker
+                value={historicalRange}
+                onChange={setHistoricalRange}
+              />
+            </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <HistoricalChart
                 data={historicalData}
@@ -558,6 +703,7 @@ export default function Dashboard() {
                 title="Temperature"
                 unit="°C"
                 color="#f97316"
+                rangeKey={historicalRange}
               />
               <HistoricalChart
                 data={historicalData}
@@ -565,6 +711,7 @@ export default function Dashboard() {
                 title="pH Level"
                 unit=""
                 color="#6366f1"
+                rangeKey={historicalRange}
               />
               <HistoricalChart
                 data={historicalData}
@@ -572,6 +719,7 @@ export default function Dashboard() {
                 title="Dissolved Oxygen"
                 unit="mg/L"
                 color="#10b981"
+                rangeKey={historicalRange}
               />
               <HistoricalChart
                 data={historicalData}
@@ -579,6 +727,7 @@ export default function Dashboard() {
                 title="Electrical Conductivity"
                 unit="mS/cm"
                 color="#f59e0b"
+                rangeKey={historicalRange}
               />
             </div>
           </section>

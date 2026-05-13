@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import type { SensorData, ActuatorStatus, HistoricalData, SystemEvent } from '@/types';
+import type { SensorData, ActuatorStatus, HistoricalData, SystemEvent, DeviceSettings } from '@/types';
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
@@ -39,6 +39,15 @@ export interface ActuatorStateRow {
   light: boolean;
   feed_count_today: number;
   last_feed_at: string | null;
+  updated_at: string;
+  // Added 2026-05-13: firmware reports the feed interval it is currently
+  // using here. Nullable for backwards compat with pre-upgrade firmware.
+  feed_interval_minutes: number | null;
+}
+
+export interface DeviceSettingsRow {
+  device_id: string;
+  feed_interval_minutes: number;
   updated_at: string;
 }
 
@@ -82,6 +91,14 @@ export function mapActuatorRow(r: ActuatorStateRow): ActuatorStatus {
     light: r.light,
     lastFeedAt: parseSafeDate(r.last_feed_at),
     feedCountToday: r.feed_count_today ?? 0,
+    feedIntervalMinutesActive: r.feed_interval_minutes ?? null,
+  };
+}
+
+export function mapDeviceSettingsRow(r: DeviceSettingsRow): DeviceSettings {
+  return {
+    feedIntervalMinutes: r.feed_interval_minutes,
+    updatedAt: new Date(r.updated_at),
   };
 }
 
@@ -162,6 +179,30 @@ export async function fetchHistoricalReadings(limit = 50): Promise<HistoricalDat
   return (data as SensorReadingRow[]).map(mapHistoricalRow).reverse();
 }
 
+// Fetch all rows newer than `now() - rangeMinutes`, capped at `maxRows`.
+// Returned in chronological order (oldest first) so recharts can plot
+// left-to-right without a reverse on the consumer side.
+//
+// We don't bin server-side; for ranges that would exceed maxRows the chart
+// shows a window of the most recent maxRows points, with a note in the UI.
+// Server-side aggregation (date_trunc / time_bucket) is a future improvement
+// once thesis demo constraints lift.
+export async function fetchHistoricalReadingsByRange(
+  rangeMinutes: number,
+  maxRows = 2000,
+): Promise<HistoricalData[]> {
+  const sinceIso = new Date(Date.now() - rangeMinutes * 60_000).toISOString();
+  const { data, error } = await supabase
+    .from('sensor_readings')
+    .select('*')
+    .eq('device_id', DEVICE_ID)
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: false })
+    .limit(maxRows);
+  if (error || !data) return [];
+  return (data as SensorReadingRow[]).map(mapHistoricalRow).reverse();
+}
+
 export async function fetchActuatorState(): Promise<ActuatorStatus | null> {
   const { data, error } = await supabase
     .from('actuator_state')
@@ -170,4 +211,54 @@ export async function fetchActuatorState(): Promise<ActuatorStatus | null> {
     .maybeSingle();
   if (error || !data) return null;
   return mapActuatorRow(data as ActuatorStateRow);
+}
+
+export async function fetchDeviceSettings(): Promise<DeviceSettings | null> {
+  const { data, error } = await supabase
+    .from('device_settings')
+    .select('*')
+    .eq('device_id', DEVICE_ID)
+    .maybeSingle();
+  if (error || !data) return null;
+  return mapDeviceSettingsRow(data as DeviceSettingsRow);
+}
+
+// Hybrid path for instant settings updates:
+//   1. Upsert device_settings (canonical persistent value the firmware
+//      polls at boot or on demand)
+//   2. Drop a `reload_settings` row into actuator_commands so the firmware,
+//      which polls that queue every ~3s, re-reads device_settings without
+//      waiting for a background refresh
+//
+// Both writes use the same anon-permissive RLS as the rest of the app.
+// If either fails the caller throws -- the dashboard surfaces the error
+// with the same UX as a failed actuator toggle.
+export async function updateFeedInterval(minutes: number): Promise<void> {
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+    throw new Error(`feed interval must be an integer between 1 and 1440 (got ${minutes})`);
+  }
+
+  const { error: upsertErr } = await supabase
+    .from('device_settings')
+    .upsert(
+      {
+        device_id: DEVICE_ID,
+        feed_interval_minutes: minutes,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'device_id' },
+    );
+  if (upsertErr) throw upsertErr;
+
+  // Signal the firmware to re-read device_settings on its next ~3s poll.
+  // `state` is unused by the reload_settings handler; we send `true` for
+  // schema compatibility with the boolean column.
+  const { error: signalErr } = await supabase
+    .from('actuator_commands')
+    .insert({
+      device_id: DEVICE_ID,
+      actuator: 'reload_settings',
+      state: true,
+    });
+  if (signalErr) throw signalErr;
 }

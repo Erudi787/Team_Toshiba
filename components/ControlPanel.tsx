@@ -1,6 +1,6 @@
 'use client';
 
-import { ActuatorStatus } from '@/types';
+import { ActuatorStatus, DeviceSettings } from '@/types';
 import type { ToggleableActuator } from '@/lib/supabase';
 import {
   UtensilsCrossed,
@@ -9,6 +9,8 @@ import {
   Lightbulb,
   Loader2,
   AlertCircle,
+  Timer,
+  CalendarClock,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
@@ -17,10 +19,19 @@ export interface ActuatorUiInfo {
   error?: string;
 }
 
+export interface FeedScheduleUi {
+  pending?: boolean;        // upsert in flight
+  pendingValue?: number;    // value the dashboard is trying to set
+  error?: string;
+}
+
 interface ControlPanelProps {
   status: ActuatorStatus;
   onToggle: (actuator: ToggleableActuator) => void;
   uiInfo?: Record<ToggleableActuator, ActuatorUiInfo>;
+  settings: DeviceSettings | null;
+  onChangeFeedInterval: (minutes: number) => void;
+  scheduleUi?: FeedScheduleUi;
 }
 
 interface ActuatorConfigEntry {
@@ -63,6 +74,9 @@ export default function ControlPanel({
   status,
   onToggle,
   uiInfo,
+  settings,
+  onChangeFeedInterval,
+  scheduleUi,
 }: Readonly<ControlPanelProps>) {
   return (
     <div
@@ -86,6 +100,19 @@ export default function ControlPanel({
       <FeedingStatus
         lastFeedAt={status.lastFeedAt}
         feedCountToday={status.feedCountToday}
+        feedIntervalMinutes={
+          // Display the *active* interval the firmware reports it is using.
+          // Fall back to the operator-set value if firmware hasn't upserted
+          // yet (pre-upgrade firmware or no actuator_state row yet).
+          status.feedIntervalMinutesActive ?? settings?.feedIntervalMinutes ?? null
+        }
+      />
+
+      <FeedSchedule
+        settings={settings}
+        activeMinutes={status.feedIntervalMinutesActive}
+        onChange={onChangeFeedInterval}
+        ui={scheduleUi}
       />
 
       <PanelFooterInfo />
@@ -382,38 +409,65 @@ function RowFeedback({
   return null;
 }
 
-// ─── Feeding status (last fed + daily count) ────────────────────────────────
+// ─── Feeding status (last fed + daily count + next feed) ────────────────────
 function FeedingStatus({
   lastFeedAt,
   feedCountToday,
+  feedIntervalMinutes,
 }: Readonly<{
   lastFeedAt: Date | null;
   feedCountToday: number;
+  feedIntervalMinutes: number | null;
 }>) {
+  // Re-render once per second so the next-feed countdown ticks visibly.
+  // Cheap (no network) and the panel is small.
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 15000);
+    const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
+  const nextFeedAt =
+    lastFeedAt && feedIntervalMinutes != null
+      ? new Date(lastFeedAt.getTime() + feedIntervalMinutes * 60_000)
+      : null;
+
   return (
-    <div
-      className="mt-4 flex items-center gap-2.5 rounded-xl px-3.5 py-2.5"
-      style={{
-        background: 'rgba(16,185,129,0.05)',
-        border: '1px solid rgba(16,185,129,0.12)',
-      }}
-    >
-      <Clock className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-      <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2">
-        <span className="text-[11px] text-slate-500">Last feed</span>
-        <span className="text-xs font-semibold text-emerald-300 tabular-nums">
-          {formatRelativeTime(lastFeedAt, now)}
+    <div className="mt-4 space-y-2">
+      <div
+        className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5"
+        style={{
+          background: 'rgba(16,185,129,0.05)',
+          border: '1px solid rgba(16,185,129,0.12)',
+        }}
+      >
+        <Clock className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+        <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2">
+          <span className="text-[11px] text-slate-500">Last feed</span>
+          <span className="text-xs font-semibold text-emerald-300 tabular-nums">
+            {formatRelativeTime(lastFeedAt, now)}
+          </span>
+        </div>
+        <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full tabular-nums">
+          {feedCountToday} today
         </span>
       </div>
-      <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded-full tabular-nums">
-        {feedCountToday} today
-      </span>
+
+      <div
+        className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5"
+        style={{
+          background: 'rgba(99,102,241,0.05)',
+          border: '1px solid rgba(99,102,241,0.12)',
+        }}
+      >
+        <CalendarClock className="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" />
+        <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2">
+          <span className="text-[11px] text-slate-500">Next feed</span>
+          <span className="text-xs font-semibold text-indigo-300 tabular-nums">
+            {formatNextFeed(nextFeedAt, now)}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -425,4 +479,178 @@ function formatRelativeTime(when: Date | null, now: Date): string {
   if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return `${Math.floor(sec / 86400)}d ago`;
+}
+
+// Combine absolute clock time (16:42) with a relative countdown (in 4m 12s)
+// so the operator gets both at-a-glance: when AND how long. If the next feed
+// is overdue (firmware hasn't fired it yet -- WiFi outage, sensor fault, daily
+// cap, etc.), show "due now" rather than negative seconds.
+function formatNextFeed(nextFeedAt: Date | null, now: Date): string {
+  if (!nextFeedAt) return 'After first feed';
+  const ms = nextFeedAt.getTime() - now.getTime();
+  const hh = String(nextFeedAt.getHours()).padStart(2, '0');
+  const mm = String(nextFeedAt.getMinutes()).padStart(2, '0');
+  const clock = `${hh}:${mm}`;
+  if (ms <= 0) return `${clock} · due now`;
+  const totalSec = Math.floor(ms / 1000);
+  if (totalSec < 60) return `${clock} · in ${totalSec}s`;
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return `${clock} · in ${m}m ${String(s).padStart(2, '0')}s`;
+  const h = Math.floor(m / 60);
+  const mr = m % 60;
+  return `${clock} · in ${h}h ${String(mr).padStart(2, '0')}m`;
+}
+
+// ─── Feed schedule (operator-tunable interval) ───────────────────────────────
+const FEED_INTERVAL_PRESETS: { label: string; minutes: number }[] = [
+  { label: '1 min', minutes: 1 },
+  { label: '5 min', minutes: 5 },
+  { label: '30 min', minutes: 30 },
+  { label: '1 hr', minutes: 60 },
+  { label: '6 hr', minutes: 360 },
+];
+
+function FeedSchedule({
+  settings,
+  activeMinutes,
+  onChange,
+  ui,
+}: Readonly<{
+  settings: DeviceSettings | null;
+  activeMinutes: number | null;
+  onChange: (minutes: number) => void;
+  ui: FeedScheduleUi | undefined;
+}>) {
+  const desired = settings?.feedIntervalMinutes ?? null;
+  const pending = ui?.pending === true;
+  const pendingValue = ui?.pendingValue;
+  const error = ui?.error;
+
+  // What we display as "current" depends on whether a write is in flight.
+  // While pending, the optimistic value the user clicked wins; otherwise
+  // we show the operator's saved setting from device_settings.
+  const displayedSetting = pendingValue ?? desired;
+
+  // Has the firmware caught up? Compare the operator-set value with what
+  // the device reports as active. If either is unknown we don't decorate.
+  const applying =
+    desired != null && activeMinutes != null && desired !== activeMinutes;
+
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customValue, setCustomValue] = useState<string>(
+    desired != null && !FEED_INTERVAL_PRESETS.find(p => p.minutes === desired)
+      ? String(desired)
+      : '',
+  );
+
+  function commitCustom() {
+    const n = parseInt(customValue, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 1440) return;
+    onChange(n);
+    setCustomOpen(false);
+  }
+
+  return (
+    <div
+      className="mt-3 rounded-xl px-3.5 py-3"
+      style={{
+        background: 'rgba(20,184,166,0.04)',
+        border: '1px solid rgba(20,184,166,0.12)',
+      }}
+    >
+      <div className="flex items-center gap-2.5 mb-2.5">
+        <Timer className="w-3.5 h-3.5 text-teal-400 flex-shrink-0" />
+        <div className="flex-1 min-w-0 flex items-baseline justify-between gap-2">
+          <span className="text-[11px] font-semibold text-teal-400 uppercase tracking-wider">
+            Feed schedule
+          </span>
+          <span className="text-[11px] text-slate-500 tabular-nums">
+            {displayedSetting != null ? `${displayedSetting} min` : '—'}
+            {applying && (
+              <span className="ml-1.5 inline-flex items-center gap-1 text-[10px] text-blue-400">
+                <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                applying
+              </span>
+            )}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {FEED_INTERVAL_PRESETS.map((p) => {
+          const isSelected = displayedSetting === p.minutes;
+          return (
+            <button
+              key={p.minutes}
+              onClick={() => onChange(p.minutes)}
+              disabled={pending}
+              className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+              style={{
+                background: isSelected
+                  ? 'rgba(20,184,166,0.18)'
+                  : 'rgba(255,255,255,0.03)',
+                color: isSelected ? '#5eead4' : '#94a3b8',
+                border: `1px solid ${
+                  isSelected ? 'rgba(20,184,166,0.35)' : 'rgba(255,255,255,0.06)'
+                }`,
+              }}
+            >
+              {p.label}
+            </button>
+          );
+        })}
+        <button
+          onClick={() => setCustomOpen((v) => !v)}
+          disabled={pending}
+          className="px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+          style={{
+            background: customOpen
+              ? 'rgba(20,184,166,0.18)'
+              : 'rgba(255,255,255,0.03)',
+            color: customOpen ? '#5eead4' : '#94a3b8',
+            border: `1px solid ${
+              customOpen ? 'rgba(20,184,166,0.35)' : 'rgba(255,255,255,0.06)'
+            }`,
+          }}
+        >
+          Custom
+        </button>
+      </div>
+
+      {customOpen && (
+        <div className="mt-2 flex items-center gap-2">
+          <input
+            type="number"
+            min={1}
+            max={1440}
+            value={customValue}
+            onChange={(e) => setCustomValue(e.target.value)}
+            placeholder="1–1440"
+            className="flex-1 px-2.5 py-1.5 rounded-md text-xs bg-white/[0.03] border border-white/[0.06] text-slate-200 placeholder-slate-600 focus:outline-none focus:border-teal-400/40 tabular-nums"
+          />
+          <span className="text-[10px] text-slate-500 uppercase tracking-wider">min</span>
+          <button
+            onClick={commitCustom}
+            disabled={pending || !customValue}
+            className="px-3 py-1.5 rounded-md text-[10px] font-bold uppercase tracking-wider transition-all duration-200 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+            style={{
+              background: 'linear-gradient(135deg, #14b8a6, #0d9488)',
+              color: '#f8fafc',
+              border: '1px solid rgba(20,184,166,0.5)',
+            }}
+          >
+            Apply
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-400">
+          <AlertCircle className="w-3 h-3 flex-shrink-0" />
+          <span className="truncate">{error}</span>
+        </div>
+      )}
+    </div>
+  );
 }

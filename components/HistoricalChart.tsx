@@ -1,6 +1,6 @@
 'use client';
 
-import { HistoricalData } from '@/types';
+import { HistoricalData, HistoricalRangeKey } from '@/types';
 import {
   AreaChart,
   Area,
@@ -20,11 +20,53 @@ interface HistoricalChartProps {
   title: string;
   unit: string;
   color: string;
+  // Active time range — drives X-axis label format. Short ranges show clock
+  // time; long ranges show date so the user isn't squinting at indistinguishable
+  // timestamps. Optional with a sensible default for backwards compat.
+  rangeKey?: HistoricalRangeKey;
+}
+
+// Pick a label format that's actually readable for each range. We lean on
+// date-fns's tokens directly:
+//   1h / 6h        → HH:mm  (sub-hour resolution that fits in the tick width)
+//   24h            → HH:mm  (still clock-only; one day = same date everywhere)
+//   7d / 30d       → MM/dd  (day-level resolution; clock time would be noise)
+function formatTickForRange(date: Date, rangeKey: HistoricalRangeKey): string {
+  switch (rangeKey) {
+    case '1h':
+    case '6h':
+      return format(date, 'HH:mm');
+    case '24h':
+      return format(date, 'HH:mm');
+    case '7d':
+    case '30d':
+      return format(date, 'MM/dd');
+    default:
+      return format(date, 'HH:mm:ss');
+  }
+}
+
+// Tooltip uses a richer format -- the user is actively hovering, so we can
+// afford the screen real estate. Always shows date + time so there's no
+// ambiguity even on long ranges.
+function formatTooltipLabelForRange(date: Date, rangeKey: HistoricalRangeKey): string {
+  switch (rangeKey) {
+    case '1h':
+    case '6h':
+    case '24h':
+      return format(date, 'MMM d, HH:mm:ss');
+    case '7d':
+    case '30d':
+      return format(date, 'MMM d, HH:mm');
+    default:
+      return format(date, 'MMM d, HH:mm:ss');
+  }
 }
 
 interface TooltipPayload {
   value: number;
   name: string;
+  payload?: { tooltipLabel?: string };
 }
 
 function CustomTooltip({
@@ -42,6 +84,11 @@ function CustomTooltip({
 }) {
   if (!active || !payload?.length) return null;
 
+  // Prefer the richer tooltip label baked into the chart datum (date+time,
+  // unambiguous on long ranges) and fall back to the X-axis tick label
+  // (clock-only) if it isn't available.
+  const richLabel = payload[0].payload?.tooltipLabel ?? label;
+
   return (
     <div
       className="rounded-xl px-3.5 py-2.5"
@@ -52,7 +99,7 @@ function CustomTooltip({
         backdropFilter: 'blur(16px)',
       }}
     >
-      <p className="text-[11px] text-slate-500 mb-1">{label}</p>
+      <p className="text-[11px] text-slate-500 mb-1">{richLabel}</p>
       <p className="text-base font-bold" style={{ color }}>
         {Number(payload[0].value).toFixed(2)}
         <span className="text-xs font-normal text-slate-400 ml-1">{unit}</span>
@@ -67,6 +114,7 @@ export default function HistoricalChart({
   title,
   unit,
   color,
+  rangeKey = '1h',
 }: HistoricalChartProps) {
   const [mounted, setMounted] = useState(false);
 
@@ -77,7 +125,8 @@ export default function HistoricalChart({
   const chartData =
     data.length > 0
       ? data.map(item => ({
-          time: format(new Date(item.timestamp), 'HH:mm:ss'),
+          time: formatTickForRange(new Date(item.timestamp), rangeKey),
+          tooltipLabel: formatTooltipLabelForRange(new Date(item.timestamp), rangeKey),
           value: item[parameter],
         }))
       : [];
