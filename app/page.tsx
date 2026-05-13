@@ -467,6 +467,22 @@ export default function Dashboard() {
     return () => timers.forEach(clearTimeout);
   }, [actuatorUi]);
 
+  // Clear the scheduleUi pending marker once device_settings catches up
+  // with what we wrote. This is the "save confirmed" moment from the
+  // user's perspective; the separate "applying" badge stays on until the
+  // firmware reports back via actuator_state.feed_interval_minutes.
+  // MUST sit above the !mounted early return -- moving it below changes
+  // the hook count between first render and subsequent renders, which
+  // trips React error #310.
+  useEffect(() => {
+    if (
+      scheduleUi.pendingValue != null &&
+      deviceSettings?.feedIntervalMinutes === scheduleUi.pendingValue
+    ) {
+      setScheduleUi({});
+    }
+  }, [deviceSettings?.feedIntervalMinutes, scheduleUi.pendingValue]);
+
   // ─── Loading screen ────────────────────────────────────────────────────────
   if (!mounted) {
     return (
@@ -571,19 +587,6 @@ export default function Dashboard() {
       }, 5000);
     }
   };
-
-  // Clear the scheduleUi pending marker once device_settings catches up
-  // with what we wrote. This is the "save confirmed" moment from the
-  // user's perspective; the separate "applying" badge stays on until the
-  // firmware reports back via actuator_state.feed_interval_minutes.
-  useEffect(() => {
-    if (
-      scheduleUi.pendingValue != null &&
-      deviceSettings?.feedIntervalMinutes === scheduleUi.pendingValue
-    ) {
-      setScheduleUi({});
-    }
-  }, [deviceSettings?.feedIntervalMinutes, scheduleUi.pendingValue]);
 
   // ─── Render ────────────────────────────────────────────────────────────────
   return (
